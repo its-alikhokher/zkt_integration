@@ -1,8 +1,8 @@
 app_name = "zkt_integration"
 app_title = "ZKT Biometrix Integration"
-app_publisher = "Muqeet Mughal"
+app_publisher = "Ali Raza"
 app_description = "A Frappe App for Frappe HRMS to Sync Biometric Employee Checkins From Device to ERPNext"
-app_email = "muqeetmughal786@gmail.com"
+app_email = "iamaliraza777@gmail.com"
 app_license = "mit"
 
 # Apps
