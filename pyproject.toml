@@ -1,7 +1,7 @@
 [project]
 name = "zkt_integration"
 authors = [
-    { name = "Muqeet Mughal", email = "muqeetmughal786@gmail.com"}
+    { name = "ALi Raza", email = "iamaliraza777@gmail.com"}
 ]
 description = "A Frappe App for Frappe HRMS to Sync Biometric Employee Checkins From Device to ERPNext"
 requires-python = ">=3.10"
