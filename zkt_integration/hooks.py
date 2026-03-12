@@ -23,8 +23,12 @@ required_apps = ["frappe/hrms"]
 
 # Includes in <head>
 # ------------------
-
-# include js, css files in header of desk.html
+# vb  
+# include js, css files in h\
+# 
+# 
+# 
+# eader of desk.html
 # app_include_css = "/assets/zkt_integration/css/zkt_integration.css"
 # app_include_js = "/assets/zkt_integration/js/zkt_integration.js"
 
