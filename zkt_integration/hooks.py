@@ -151,24 +151,23 @@ after_install = "zkt_integration.install.after_install"
 
 # Scheduled Tasks
 # ---------------
+# These jobs used to ship as "Server Script" fixtures ("Schedule Attendance Pull"
+# and "Clear Attendance Pull Logs"). They are now plain hooks so the scheduling
+# lives in version-controlled code. The patch
+# zkt_integration.patches.remove_server_script_fixtures deletes the old DB copies.
 
-# scheduler_events = {
-# 	"all": [
-# 		"zkt_integration.tasks.all"
-# 	],
-# 	"daily": [
-# 		"zkt_integration.tasks.daily"
-# 	],
-# 	"hourly": [
-# 		"zkt_integration.tasks.hourly"
-# 	],
-# 	"weekly": [
-# 		"zkt_integration.tasks.weekly"
-# 	],
-# 	"monthly": [
-# 		"zkt_integration.tasks.monthly"
-# 	],
-# }
+scheduler_events = {
+	# Pull attendance from every device in ZKT Settings and push it to Employee Checkin.
+	# Runs on the "long" queue: a device can hold ~30k records, which does not fit
+	# in the default queue's 300s job timeout.
+	"hourly_long": [
+		"zkt_integration.zkt_biometrix_integration.script.sync_attendance_log_to_erpnext",
+	],
+	# Purge the Attendance Device Log table.
+	"weekly": [
+		"zkt_integration.zkt_biometrix_integration.script.clear_logs",
+	],
+}
 
 # Testing
 # -------
@@ -245,14 +244,3 @@ after_install = "zkt_integration.install.after_install"
 # default_log_clearing_doctypes = {
 # 	"Logging DocType Name": 30  # days to retain logs
 # }
-
-
-fixtures = [
-
-  
-    {"dt": "Server Script", "filters": [
-        ["module", "in", [
-            "ZKT Biometrix Integration"
-        ]]
-    ]},
-]
