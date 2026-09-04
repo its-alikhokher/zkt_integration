@@ -13,20 +13,22 @@
    "fieldname": "devices",
    "fieldtype": "Table",
    "label": "Devices",
-   "options": "ZKT Devices"
+   "options": "ZKT Devices",
+   "description": "One row per ZKTeco device. Device ID is any name you choose; it is stored on every Employee Checkin."
   },
   {
-   "default": "{}",
+   "default": "[]",
    "fieldname": "shift_type_device_mapping",
    "fieldtype": "JSON",
-   "label": "Shift Type Device Mapping"
+   "label": "Shift Type Device Mapping",
+   "description": "Optional. Links Shift Types to the devices in the table above so HRMS auto attendance knows until when check-ins are complete. After every successful pull from a shift's devices, the Shift Type's \"Last Sync of Checkin\" is set to the pull time. Format: a JSON list, one entry per Shift Type, using the exact Shift Type names and the Device IDs from the table above. Example:<br><code>[{\"shift_type_name\": \"Morning Shift\", \"related_device_id\": [\"main-entrance\"]}, {\"shift_type_name\": \"Evening Shift\", \"related_device_id\": [\"main-entrance\", \"back-gate\"]}]</code><br>Leave it as <code>[]</code> if you do not use auto attendance."
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2025-12-27 16:35:04.879648",
+ "modified": "2026-09-04 19:29:05.579850",
  "modified_by": "Administrator",
  "module": "ZKT Biometrix Integration",
  "name": "ZKT Settings",

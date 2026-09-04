@@ -158,10 +158,11 @@ after_install = "zkt_integration.install.after_install"
 
 scheduler_events = {
 	# Pull attendance from every device in ZKT Settings and push it to Employee Checkin.
-	# Runs on the "long" queue: a device can hold ~30k records, which does not fit
-	# in the default queue's 300s job timeout.
+	# The scheduler enqueues this on the "long" queue (background worker, 1500s
+	# timeout): a device can hold ~30k records, which does not fit in the default
+	# queue's 300s limit. The "Sync Attendance Now" button runs the sync directly.
 	"hourly_long": [
-		"zkt_integration.zkt_biometrix_integration.script.sync_attendance_log_to_erpnext",
+		"zkt_integration.zkt_biometrix_integration.script.scheduled_sync",
 	],
 	# Purge the Attendance Device Log table.
 	"weekly": [

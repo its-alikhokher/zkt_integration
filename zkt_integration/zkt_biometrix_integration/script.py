@@ -1,8 +1,10 @@
 import datetime
+import json
+import time
 
 import frappe
+from frappe import _
 from frappe.utils import cint
-from frappe.utils.background_jobs import is_job_enqueued
 from zk import ZK
 
 
@@ -16,6 +18,8 @@ class AttendanceSyncService:
       3. Create one Employee Checkin per new punch, with log_type IN or OUT.
     """
 
+    PORT = 4370  # ZK SDK protocol port
+
     # ZKTeco "attendance state" codes carried in each punch.
     PUNCH_IN = (0, 4)  # check-in, overtime-in
     PUNCH_OUT = (1, 5)  # check-out, overtime-out
@@ -24,30 +28,99 @@ class AttendanceSyncService:
     MAX_SHIFT_HOURS = 14  # an IN older than this was never closed; next punch is a new IN
     DUPLICATE_WINDOW_SECONDS = 120  # a second punch inside this window is the same event
 
-    def __init__(self, devices, force=False):
+    PROGRESS_EVENT = "zkt_sync_progress"  # realtime event the ZKT Settings form listens to
+    STATUS_KEY = "zkt_sync_status"  # cache key holding the state of the current / last sync
+    STALE_AFTER_SECONDS = 180  # a "running" status older than this means the run died
+
+    def __init__(self, devices, force=False, shift_type_device_mapping=None, show_progress=False):
         self.devices = devices or []
         self.force = force  # True: ignore each device's pull frequency (manual run)
+        self.show_progress = show_progress  # True: push a progress bar to the browser
+        self.shift_type_device_mapping = self._parse_mapping(shift_type_device_mapping)
+        self.results = []  # one-line outcomes shown to the user after a manual run
+        self.started = None
+        self.finished = None
 
     # ------------------------------------------------------------------
     # ENTRY POINT
     # ------------------------------------------------------------------
     def run(self):
-        for device in self.devices:
+        self.started = datetime.datetime.now()
+        self._set_status(
+            state="running", percent=1, description="Starting...",
+            started=self.started.strftime("%H:%M:%S"), finished=None, took_seconds=None, error=None,
+        )
+        try:
+            self._run_devices()
+        except Exception as e:
+            self.finished = datetime.datetime.now()
+            self._set_status(
+                state="failed", percent=100, description=str(e)[:200], error=str(e)[:500],
+                finished=self.finished.strftime("%H:%M:%S"), took_seconds=self.took_seconds,
+            )
+            raise
+        self.finished = datetime.datetime.now()
+        self._set_status(
+            state="done", percent=100, description="Done",
+            finished=self.finished.strftime("%H:%M:%S"), took_seconds=self.took_seconds,
+        )
+
+    def _run_devices(self):
+        pulled = {}  # device_id -> time of a successful pull in this run
+        total = len(self.devices) or 1
+
+        for index, device in enumerate(self.devices):
+            # each device owns an equal slice of the progress bar
+            self._slice = (index * 100.0 / total, 100.0 / total)
             last_run = device.last_run
             if last_run and not self.force:
                 minutes = (datetime.datetime.now() - last_run).total_seconds() / 60
                 if minutes < (device.pull_frequency or 0):
                     self._log(
                         f"Skipping device {device.device_id}; pull frequency not met "
-                        f"({minutes:.0f} of {device.pull_frequency} minutes)"
+                        f"({minutes:.0f} of {device.pull_frequency} minutes)",
+                        show=True,
                     )
                     continue
 
             self._log(f"Processing device: {device.device_id} (last run {last_run})")
-            self._process_device(device)
+            self._progress(0.02, f"Device {device.device_id}: connecting to {device.ip}...")
+            pull_time = datetime.datetime.now()
+            if self._process_device(device):
+                pulled[device.device_id] = pull_time
 
-            device.last_run = datetime.datetime.now()
+            device.last_run = pull_time
             device.save(ignore_permissions=True)
+
+        self._update_shift_sync(pulled)
+
+    @property
+    def took_seconds(self):
+        if not (self.started and self.finished):
+            return None
+        return round((self.finished - self.started).total_seconds(), 1)
+
+    def _progress(self, fraction, description):
+        """Advance the progress bar. `fraction` is 0..1 within the current device's
+        slice of the bar."""
+        base, span = getattr(self, "_slice", (0, 100))
+        self._set_status(percent=max(1, min(99, int(base + span * fraction))), description=description)
+
+    def _set_status(self, **fields):
+        """Keep the state of this run in the cache (so the ZKT Settings form can show
+        it again after a page refresh) and, for a browser-started run, push it live.
+        A cache or realtime hiccup must never break the sync."""
+        try:
+            status = frappe.cache.get_value(self.STATUS_KEY) or {}
+            status.update(fields)
+            status["lines"] = list(self.results)
+            status["updated_ts"] = time.time()  # epoch: timezone-proof staleness check
+            frappe.cache.set_value(self.STATUS_KEY, status, expires_in_sec=7 * 24 * 3600)
+            if self.show_progress:
+                # copy: the cache hands back the same dict object within a request
+                frappe.publish_realtime(self.PROGRESS_EVENT, dict(status), user=frappe.session.user)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # DEVICE PIPELINE
@@ -56,8 +129,11 @@ class AttendanceSyncService:
         # Step 1: which device user IDs belong to an Active Employee?
         employees = self._active_employees_by_device_id()
         if not employees:
-            self._log(f"No Active Employee has an Attendance Device ID; skipping device {device.device_id}")
-            return
+            self._log(
+                f"No Active Employee has an Attendance Device ID; skipping device {device.device_id}",
+                show=True,
+            )
+            return False
         self._log(
             f"{len(employees)} Active Employees have an Attendance Device ID: " + ", ".join(sorted(employees))
         )
@@ -65,6 +141,8 @@ class AttendanceSyncService:
         # Step 2: pull the device log and keep only those users' punches, oldest first.
         # The ZK protocol has no per-user filter, so the filter is applied here.
         all_logs = self._fetch_from_device(device)
+        if all_logs is None:
+            return False
         logs = sorted(
             (log for log in all_logs if str(log["user_id"]).strip() in employees),
             key=lambda log: log["timestamp"],
@@ -72,10 +150,12 @@ class AttendanceSyncService:
         ignored = len(all_logs) - len(logs)
         self._log(
             f"Fetched {len(all_logs)} logs from device {device.device_id}: "
-            f"{len(logs)} belong to Active Employees, {ignored} ignored (no Active Employee with that ID)"
+            f"{len(logs)} belong to Active Employees, {ignored} ignored (no Active Employee with that ID)",
+            show=True,
         )
+        self._progress(0.3, f"Device {device.device_id}: {len(all_logs)} logs fetched, {len(logs)} to check")
         if not logs:
-            return
+            return True
 
         # Step 3: one Employee Checkin per new punch.
         existing = self._existing_checkins(set(employees.values()), logs[0]["timestamp"])
@@ -84,7 +164,15 @@ class AttendanceSyncService:
         already = duplicates = failed = 0
         per_user = {}
 
-        for log in logs:
+        report_every = max(1, len(logs) // 25)
+
+        for position, log in enumerate(logs, start=1):
+            if position % report_every == 0 or position == len(logs):
+                self._progress(
+                    0.3 + 0.65 * position / len(logs),
+                    f"Device {device.device_id}: {position}/{len(logs)} punches checked, "
+                    f"{created['IN'] + created['OUT'] + created['']} check-ins created",
+                )
             user_id = str(log["user_id"]).strip()
             employee = employees[user_id]
             ts = log["timestamp"]
@@ -116,7 +204,7 @@ class AttendanceSyncService:
         if created[""]:
             summary += f" + {created['']} without log type"
         summary += f", {duplicates} duplicate punches ignored, {failed} rejected by HRMS"
-        self._log(summary)
+        self._log(summary, show=True)
         self._log("Per user: " + ", ".join(f"{uid} ({count})" for uid, count in sorted(per_user.items())))
 
         # Only clear the device when every record on it has been handled. Punches of
@@ -127,6 +215,42 @@ class AttendanceSyncService:
             # self._clear_device(device)
         else:
             self._log("Not clearing device — pending unsynced logs remain")
+        return True
+
+    # ------------------------------------------------------------------
+    # SHIFT TYPE SYNC TIME
+    # ------------------------------------------------------------------
+    def _parse_mapping(self, raw):
+        """shift_type_device_mapping is a JSON list of
+        {"shift_type_name": "...", "related_device_id": ["...", ...]}."""
+        if not raw:
+            return []
+        try:
+            mapping = json.loads(raw) if isinstance(raw, str) else raw
+        except ValueError:
+            self._log("[SETTINGS WARNING] Shift Type Device Mapping is not valid JSON; ignoring it")
+            return []
+        return mapping if isinstance(mapping, list) else []
+
+    def _update_shift_sync(self, pulled):
+        """Set Shift Type.last_sync_of_checkin for every mapped shift whose devices
+        were all pulled successfully in this run. HRMS auto attendance only marks
+        attendance for shifts that ended before this time."""
+        for entry in self.shift_type_device_mapping:
+            shift = entry.get("shift_type_name")
+            devices = entry.get("related_device_id") or []
+            if isinstance(devices, str):
+                devices = [devices]
+            if not shift or not devices:
+                continue
+            if not frappe.db.exists("Shift Type", shift):
+                self._log(f"[SETTINGS WARNING] Shift Type '{shift}' in the mapping does not exist", show=True)
+                continue
+            if not all(d in pulled for d in devices):
+                continue  # at least one of its devices was skipped or failed this run
+            sync_time = min(pulled[d] for d in devices)
+            frappe.db.set_value("Shift Type", shift, "last_sync_of_checkin", sync_time)
+            self._log(f"Shift Type '{shift}': Last Sync of Checkin set to {sync_time:%Y-%m-%d %H:%M:%S}", show=True)
 
     # ------------------------------------------------------------------
     # IN / OUT
@@ -223,7 +347,10 @@ class AttendanceSyncService:
             return 0
 
     def _fetch_from_device(self, device):
-        zk = ZK(device.ip, port=4370, password=self._comm_key(device))
+        # ommit_ping: pyzk otherwise shells out to `ping` before connecting, which
+        # fails wherever ICMP is blocked or the ping binary is missing (containers,
+        # port-forwarded devices) even though port 4370 is reachable.
+        zk = ZK(device.ip, port=self.PORT, password=self._comm_key(device), timeout=10, ommit_ping=True)
         conn = None
 
         try:
@@ -233,8 +360,12 @@ class AttendanceSyncService:
             return [log.__dict__ for log in logs]
 
         except Exception as e:
-            self._log(f"[DEVICE ERROR] {device.device_id} → {str(e)}")
-            return []
+            self._log(
+                f"[DEVICE ERROR] {device.device_id} → {e} "
+                f"(connecting to {device.ip}:{self.PORT} from this server)",
+                show=True,
+            )
+            return None
 
         finally:
             if conn:
@@ -246,7 +377,7 @@ class AttendanceSyncService:
 
     #     self._log("Clearing device:" + device.device_id)
     #     try:
-    #         zk = ZK(device.ip, port=4370, password=self._comm_key(device))
+    #         zk = ZK(device.ip, port=self.PORT, password=self._comm_key(device), ommit_ping=True)
     #         conn = zk.connect()
     #         conn.clear_attendance()
     #         conn.disconnect()
@@ -256,8 +387,10 @@ class AttendanceSyncService:
     # ------------------------------------------------------------------
     # LOGGING
     # ------------------------------------------------------------------
-    def _log(self, msg):
+    def _log(self, msg, show=False):
         print(msg)
+        if show:
+            self.results.append(msg)
         frappe.get_doc({
             "doctype": "Attendance Device Log",
             "log_entry": msg,
@@ -270,45 +403,83 @@ class AttendanceSyncService:
 # ----------------------------------------------------------------------
 @frappe.whitelist()
 def clear_logs():
-    frappe.db.delete("Attendance Device Log")
+    """"Clear Logs" button on the Attendance Device Log list, and the weekly job.
+    Plain SQL: this is a log table, no hooks or per-row deletes needed."""
+    frappe.only_for("System Manager")
+    count = frappe.db.count("Attendance Device Log")
+    frappe.db.sql("DELETE FROM `tabAttendance Device Log`")
     frappe.db.commit()
+    return {"deleted": count}
 
 
-SYNC_JOB_ID = "zkt_integration::sync_attendance"
+def get_status():
+    """State of the current or last sync. A run that stopped reporting progress
+    for STALE_AFTER_SECONDS (process killed, request timed out) is reported as failed."""
+    status = frappe.cache.get_value(AttendanceSyncService.STATUS_KEY) or {}
+    if status.get("state") == "running":
+        age = time.time() - (status.get("updated_ts") or 0)
+        if age > AttendanceSyncService.STALE_AFTER_SECONDS:
+            status["state"] = "failed"
+            status["error"] = "The sync stopped without finishing (no progress for 3 minutes)."
+            status["description"] = status["error"]
+            frappe.cache.set_value(AttendanceSyncService.STATUS_KEY, status, expires_in_sec=7 * 24 * 3600)
+    return status
+
+
+@frappe.whitelist()
+def get_sync_status():
+    """Polled by the ZKT Settings form on load / refresh."""
+    frappe.only_for("System Manager")
+    return get_status()
 
 
 @frappe.whitelist()
 def sync_attendance_log_to_erpnext(force=False):
-    """Pull every device in ZKT Settings into Employee Checkin.
+    """Pull every device in ZKT Settings into Employee Checkin and return the outcome.
 
-    Scheduler (hourly_long) calls it without arguments, so each device's pull
-    frequency is respected. force=True runs every device right now.
-    """
-    settings = frappe.get_doc("ZKT Settings")
-    AttendanceSyncService(devices=settings.get("devices") or [], force=cint(force)).run()
-
-
-@frappe.whitelist()
-def enqueue_sync():
-    """"Sync Attendance Now" button on ZKT Settings.
-
-    Runs sync_attendance_log_to_erpnext(force=True) on the long queue, the same
-    queue the scheduler uses, so a large first run cannot hit the web request
-    timeout. Only one sync job is kept in the queue at a time.
+    Used by the scheduler (hourly_long, respects each device's pull frequency),
+    by `bench execute`, and by the "Sync Attendance Now" button on ZKT Settings
+    (force=1: runs every device right now, the request waits until it is done).
     """
     frappe.only_for("System Manager")
-    if is_job_enqueued(SYNC_JOB_ID):
-        return {"queued": False}
+    status = get_status()
+    if status.get("state") == "running":
+        frappe.throw(
+            _("A sync is already running (started at {0}). Wait for it to finish.").format(status.get("started"))
+        )
 
-    frappe.enqueue(
-        "zkt_integration.zkt_biometrix_integration.script.sync_attendance_log_to_erpnext",
-        queue="long",
-        timeout=1500,
-        job_id=SYNC_JOB_ID,
-        deduplicate=True,
-        force=True,
+    settings = frappe.get_doc("ZKT Settings")
+    service = AttendanceSyncService(
+        devices=settings.get("devices") or [],
+        force=cint(force),
+        shift_type_device_mapping=settings.get("shift_type_device_mapping"),
+        show_progress=bool(getattr(frappe.local, "request", None)),  # only for a browser call
     )
-    return {"queued": True}
+    service.run()
+    return {
+        "lines": service.results,
+        "started": service.started.strftime("%H:%M:%S"),
+        "finished": service.finished.strftime("%H:%M:%S"),
+        "took_seconds": service.took_seconds,
+    }
+
+
+def scheduled_sync():
+    """Entry point for the scheduler (hooks.scheduler_events, hourly_long).
+
+    Frappe's scheduler enqueues this on the "long" queue, so it already runs in a
+    background worker. Unlike the button, an overlapping run is skipped quietly
+    instead of raising, so the Scheduled Job Log does not fill with failures.
+    """
+    status = get_status()
+    if status.get("state") == "running":
+        frappe.get_doc({
+            "doctype": "Attendance Device Log",
+            "log_entry": f"Scheduled sync skipped: a sync is already running (started at {status.get('started')})",
+            "log_time": datetime.datetime.now(),
+        }).insert(ignore_permissions=True)
+        return
+    sync_attendance_log_to_erpnext()
 
 
 @frappe.whitelist()

@@ -56,7 +56,9 @@ Upgrading from an older version also:
 
 ### 1. ZKT Settings
 
-Open **ZKT Settings** and add one row per device:
+Installation creates **ZKT Settings** with one example row (`example-device`,
+`192.168.1.201`) and an example shift mapping. Replace the example with your real
+device; keep one row per device:
 
 | Field | Meaning |
 |---|---|
@@ -156,6 +158,32 @@ button, and the table is emptied automatically once a week (`weekly` in `hooks.p
 | `[DEVICE WARNING] … device password must be numeric, using 0` | The Device Password field holds text. Clear it, or enter the numeric comm key. |
 | `[ERP ERROR] … Transactions cannot be created for an Inactive Employee` | HRMS rejected the punch; the Employee is not Active. |
 | Nothing happens after clicking the button | Background workers are not running (`bench worker` / supervisor), or the scheduler queue is paused. |
+
+## Server and device on different networks
+
+The app connects **from the server to the device** on TCP port 4370. A server on the
+internet (a VPS) cannot reach a device on an office LAN address such as `192.168.x.x`
+or `10.x.x.x`; the log then shows `[DEVICE ERROR] … timed out` or `can't reach device`.
+Pick one:
+
+**A. Port forwarding (permanent, no extra machine).** On the office router forward
+TCP port 4370 to the device's LAN IP, then enter the office's public IP as *Device IP
+Address* in ZKT Settings. ZK devices have almost no authentication, so restrict the
+forward to the server's IP if the router allows it.
+
+**B. SSH reverse tunnel (works immediately from any office PC that can SSH to the
+server).**
+
+```bash
+ssh -N -R 4370:<device-lan-ip>:4370 <user>@<your-server>
+```
+
+While that command runs, the server reaches the device on `127.0.0.1`, so set
+*Device IP Address* = `127.0.0.1` in ZKT Settings. For a permanent tunnel run the
+same command through `autossh` or a systemd service on the office PC.
+
+**C. VPN** (WireGuard, OpenVPN) between the server and the office router. Most secure;
+the device keeps its LAN IP in ZKT Settings.
 
 ## Notes on devices
 
