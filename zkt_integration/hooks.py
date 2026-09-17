@@ -157,14 +157,13 @@ after_install = "zkt_integration.install.after_install"
 # zkt_integration.patches.remove_server_script_fixtures deletes the old DB copies.
 
 scheduler_events = {
-	# Pull attendance from every device in ZKT Settings and push it to Employee Checkin.
-	# The scheduler enqueues this on the "long" queue (background worker, 1500s
-	# timeout): a device can hold ~30k records, which does not fit in the default
-	# queue's 300s limit. The "Sync Attendance Now" button runs the sync directly.
-	"hourly_long": [
-		"zkt_integration.zkt_biometrix_integration.script.scheduled_sync",
-	],
-	# Purge the Attendance Device Log table.
+	"cron": {
+		# every 5 minutes: only queues the sync on the long queue (see script.scheduled_sync);
+		# each device's Pull Frequency still decides whether it is read on a given tick
+		"*/5 * * * *": [
+			"zkt_integration.zkt_biometrix_integration.script.scheduled_sync",
+		],
+	},
 	"weekly": [
 		"zkt_integration.zkt_biometrix_integration.script.clear_logs",
 	],

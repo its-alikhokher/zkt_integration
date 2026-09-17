@@ -43,9 +43,18 @@ function zkt_render(frm, status) {
 	if (!status || !status.state) return;
 	clearTimeout(frm._zkt_poll);
 
-	if (status.state === "running") {
+	if (status.state === "running" || status.state === "queued") {
+		frm._zkt_following = true;
 		frm.dashboard.show_progress(ZKT_TITLE, status.percent || 1, status.description || "");
 		frm._zkt_poll = setTimeout(() => zkt_fetch_status(frm), 3000); // fallback when realtime is down
+		return;
+	}
+
+	if (frm._zkt_following) {
+		// the run this form was following has ended: reload once for the new Last Run,
+		// and refresh() then shows the result headline
+		frm._zkt_following = false;
+		frm.reload_doc();
 		return;
 	}
 
@@ -76,12 +85,12 @@ function zkt_render(frm, status) {
 function zkt_sync_now(frm) {
 	frm.dashboard.clear_headline();
 	frm.dashboard.show_progress(ZKT_TITLE, 1, __("Starting..."));
-	// Runs right now, like `bench execute`; the request returns when the sync is done.
+	// Queues the sync in the background and returns at once; the bar then follows the job.
 	frappe.call({
 		method: `${ZKT_API}.sync_attendance_log_to_erpnext`,
 		args: { force: 1 },
 		callback() {
-			frm.reload_doc(); // Last Run changed; refresh() then shows the result headline
+			zkt_fetch_status(frm);
 		},
 		error() {
 			zkt_fetch_status(frm); // e.g. "already running": show that run's bar

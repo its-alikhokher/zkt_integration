@@ -104,7 +104,7 @@ a background job on the `long` queue, ignores the pull frequency, and reports to
 If a sync is already queued or running, the button tells you so instead of
 starting a second one.
 
-**Scheduler.** The sync runs automatically every hour (`hourly_long` in `hooks.py`)
+**Scheduler.** The sync runs automatically every 5 minutes (a `cron` event in `hooks.py` that queues it on the `long` queue)
 and respects each device's *Pull Frequency*. Make sure the scheduler is enabled:
 
 ```bash

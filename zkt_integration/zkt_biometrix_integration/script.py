@@ -5,6 +5,7 @@ import time
 import frappe
 from frappe import _
 from frappe.utils import cint
+from frappe.utils.background_jobs import is_job_enqueued
 from zk import ZK
 
 
@@ -30,7 +31,9 @@ class AttendanceSyncService:
 
     PROGRESS_EVENT = "zkt_sync_progress"  # realtime event the ZKT Settings form listens to
     STATUS_KEY = "zkt_sync_status"  # cache key holding the state of the current / last sync
-    STALE_AFTER_SECONDS = 180  # a "running" status older than this means the run died
+    STALE_AFTER_SECONDS = 180  # a "running" status this old, with no job left behind it, means the run died
+    HEARTBEAT_SECONDS = 10  # refresh the status at least this often while check-ins are being written
+    COMMIT_EVERY = 200  # check-ins per commit: a killed run keeps its finished work and releases its locks
 
     def __init__(self, devices, force=False, shift_type_device_mapping=None, show_progress=False):
         self.devices = devices or []
@@ -40,6 +43,7 @@ class AttendanceSyncService:
         self.results = []  # one-line outcomes shown to the user after a manual run
         self.started = None
         self.finished = None
+        self._last_status_at = 0.0  # epoch of the last status write, for the time-based heartbeat
 
     # ------------------------------------------------------------------
     # ENTRY POINT
@@ -91,6 +95,7 @@ class AttendanceSyncService:
 
             device.last_run = pull_time
             device.save(ignore_permissions=True)
+            frappe.db.commit()
 
         self._update_shift_sync(pulled)
 
@@ -114,7 +119,7 @@ class AttendanceSyncService:
             status = frappe.cache.get_value(self.STATUS_KEY) or {}
             status.update(fields)
             status["lines"] = list(self.results)
-            status["updated_ts"] = time.time()  # epoch: timezone-proof staleness check
+            status["updated_ts"] = self._last_status_at = time.time()  # epoch: timezone-proof staleness check
             frappe.cache.set_value(self.STATUS_KEY, status, expires_in_sec=7 * 24 * 3600)
             if self.show_progress:
                 # copy: the cache hands back the same dict object within a request
@@ -165,9 +170,15 @@ class AttendanceSyncService:
         per_user = {}
 
         report_every = max(1, len(logs) // 25)
+        uncommitted = 0  # check-ins written since the last commit
 
         for position, log in enumerate(logs, start=1):
-            if position % report_every == 0 or position == len(logs):
+            # by count for a smooth bar, and by time so a slow stretch never looks like a dead run
+            if (
+                position % report_every == 0
+                or position == len(logs)
+                or time.time() - self._last_status_at >= self.HEARTBEAT_SECONDS
+            ):
                 self._progress(
                     0.3 + 0.65 * position / len(logs),
                     f"Device {device.device_id}: {position}/{len(logs)} punches checked, "
@@ -193,6 +204,10 @@ class AttendanceSyncService:
             if ok:
                 last[employee] = (ts, direction)
                 created[direction] += 1
+                uncommitted += 1
+                if uncommitted >= self.COMMIT_EVERY:
+                    frappe.db.commit()
+                    uncommitted = 0
             else:
                 failed += 1
                 self._log(f"[ERP ERROR] {user_id} @ {ts}: {error}")
@@ -412,18 +427,36 @@ def clear_logs():
     return {"deleted": count}
 
 
+SYNC_JOB_ID = "zkt_attendance_sync"  # manual and scheduled runs share it, so they can never overlap
+SYNC_JOB_TIMEOUT = 3600  # a first import of a big device may need longer; the next run carries on from its commits
+
+
 def get_status():
-    """State of the current or last sync. A run that stopped reporting progress
-    for STALE_AFTER_SECONDS (process killed, request timed out) is reported as failed."""
+    """State of the current or last sync.
+
+    While the sync job is still queued or running the run is never called failed,
+    however long one step takes (downloading a big device log reports no progress).
+    Once the job is gone, a "queued" or "running" status that stopped updating means
+    the run died: the worker was killed or the job timed out."""
     status = frappe.cache.get_value(AttendanceSyncService.STATUS_KEY) or {}
-    if status.get("state") == "running":
+    if status.get("state") in ("queued", "running"):
         age = time.time() - (status.get("updated_ts") or 0)
-        if age > AttendanceSyncService.STALE_AFTER_SECONDS:
+        if age > AttendanceSyncService.STALE_AFTER_SECONDS and not _sync_job_alive():
             status["state"] = "failed"
-            status["error"] = "The sync stopped without finishing (no progress for 3 minutes)."
+            status["error"] = (
+                "The sync stopped without finishing (its background job is no longer running). "
+                "Check-ins written so far are saved; the next sync carries on from there."
+            )
             status["description"] = status["error"]
             frappe.cache.set_value(AttendanceSyncService.STATUS_KEY, status, expires_in_sec=7 * 24 * 3600)
     return status
+
+
+def _sync_job_alive():
+    try:
+        return is_job_enqueued(SYNC_JOB_ID)
+    except Exception:
+        return False  # redis unreachable: fall back to the age check alone
 
 
 @frappe.whitelist()
@@ -435,25 +468,65 @@ def get_sync_status():
 
 @frappe.whitelist()
 def sync_attendance_log_to_erpnext(force=False):
-    """Pull every device in ZKT Settings into Employee Checkin and return the outcome.
+    """"Sync Attendance Now" button on ZKT Settings (force=1: every device, ignoring its
+    pull frequency).
 
-    Used by the scheduler (hourly_long, respects each device's pull frequency),
-    by `bench execute`, and by the "Sync Attendance Now" button on ZKT Settings
-    (force=1: runs every device right now, the request waits until it is done).
+    Queues the sync and returns at once; the form follows it through the progress
+    event and get_sync_status. It used to run inside the request, which a big device
+    could never finish: the request timed out and every check-in written so far was
+    rolled back.
     """
     frappe.only_for("System Manager")
-    status = get_status()
-    if status.get("state") == "running":
+    if not enqueue_sync(force=cint(force), show_progress=True):
         frappe.throw(
-            _("A sync is already running (started at {0}). Wait for it to finish.").format(status.get("started"))
+            _("A sync is already running (started at {0}). Wait for it to finish.").format(
+                get_status().get("started") or "-"
+            )
         )
+    return {"queued": True}
 
+
+def scheduled_sync():
+    """Scheduler entry point (hooks.scheduler_events, every 5 minutes).
+
+    Only queues the run - cron jobs themselves run on the default queue with a 300 s
+    timeout. While a run is still going (say a first import of a big device) the tick
+    is skipped, and each device's pull frequency still decides whether it is read.
+    """
+    enqueue_sync(force=0)
+
+
+def enqueue_sync(force=0, show_progress=False):
+    """Queue one sync run on the long queue. Returns False if one is already queued or running."""
+    if _sync_job_alive():
+        return False
+
+    AttendanceSyncService(devices=[])._set_status(
+        state="queued", percent=1, description="Waiting for a background worker...",
+        started=None, finished=None, took_seconds=None, error=None,
+    )
+    frappe.enqueue(
+        run_sync,
+        queue="long",
+        timeout=SYNC_JOB_TIMEOUT,
+        job_id=SYNC_JOB_ID,
+        deduplicate=True,
+        force=force,
+        show_progress=show_progress,
+    )
+    return True
+
+
+def run_sync(force=0, show_progress=False):
+    """The sync itself, as the queued job runs it. From a console:
+    bench --site <site> execute zkt_integration.zkt_biometrix_integration.script.run_sync --kwargs "{'force': 1}"
+    """
     settings = frappe.get_doc("ZKT Settings")
     service = AttendanceSyncService(
         devices=settings.get("devices") or [],
         force=cint(force),
         shift_type_device_mapping=settings.get("shift_type_device_mapping"),
-        show_progress=bool(getattr(frappe.local, "request", None)),  # only for a browser call
+        show_progress=bool(show_progress),
     )
     service.run()
     return {
@@ -462,24 +535,6 @@ def sync_attendance_log_to_erpnext(force=False):
         "finished": service.finished.strftime("%H:%M:%S"),
         "took_seconds": service.took_seconds,
     }
-
-
-def scheduled_sync():
-    """Entry point for the scheduler (hooks.scheduler_events, hourly_long).
-
-    Frappe's scheduler enqueues this on the "long" queue, so it already runs in a
-    background worker. Unlike the button, an overlapping run is skipped quietly
-    instead of raising, so the Scheduled Job Log does not fill with failures.
-    """
-    status = get_status()
-    if status.get("state") == "running":
-        frappe.get_doc({
-            "doctype": "Attendance Device Log",
-            "log_entry": f"Scheduled sync skipped: a sync is already running (started at {status.get('started')})",
-            "log_time": datetime.datetime.now(),
-        }).insert(ignore_permissions=True)
-        return
-    sync_attendance_log_to_erpnext()
 
 
 @frappe.whitelist()
