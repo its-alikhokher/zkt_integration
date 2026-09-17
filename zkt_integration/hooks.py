@@ -160,7 +160,7 @@ scheduler_events = {
 	"cron": {
 		# every 5 minutes: only queues the sync on the long queue (see script.scheduled_sync);
 		# each device's Pull Frequency still decides whether it is read on a given tick
-		"*/5 * * * *": [
+		"*/30 * * * *": [
 			"zkt_integration.zkt_biometrix_integration.script.scheduled_sync",
 		],
 	},
