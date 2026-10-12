@@ -21,6 +21,8 @@ frappe.ui.form.on("ZKT Settings", {
 		frm.add_custom_button(__("Attendance Device Log"), () => {
 			frappe.set_route("List", "Attendance Device Log");
 		});
+
+		frm.add_custom_button(__("Device Logs"), () => zkt_device_logs_dialog());
 	},
 });
 
@@ -96,4 +98,76 @@ function zkt_sync_now(frm) {
 			zkt_fetch_status(frm); // e.g. "already running": show that run's bar
 		},
 	});
+}
+
+// Show one employee's punches exactly as the devices hold them, read live from
+// the devices (not from Employee Checkin), for a date range.
+function zkt_device_logs_dialog() {
+	const d = new frappe.ui.Dialog({
+		title: __("Device Logs"),
+		size: "large",
+		fields: [
+			{
+				fieldname: "employee",
+				label: __("Employee"),
+				fieldtype: "Link",
+				options: "Employee",
+				reqd: 1,
+				get_query: () => ({ filters: { attendance_device_id: ["is", "set"] } }),
+			},
+			{ fieldtype: "Column Break" },
+			{
+				fieldname: "from_date",
+				label: __("From Date"),
+				fieldtype: "Date",
+				reqd: 1,
+				default: frappe.datetime.add_days(frappe.datetime.get_today(), -30),
+			},
+			{ fieldtype: "Column Break" },
+			{
+				fieldname: "to_date",
+				label: __("To Date"),
+				fieldtype: "Date",
+				reqd: 1,
+				default: frappe.datetime.get_today(),
+			},
+			{ fieldtype: "Section Break" },
+			{ fieldname: "logs", fieldtype: "HTML" },
+		],
+		primary_action_label: __("Fetch from Device"),
+		primary_action(values) {
+			frappe.call({
+				method: `${ZKT_API}.get_device_logs`,
+				args: values,
+				freeze: true,
+				freeze_message: __("Reading the devices..."),
+				callback: (r) => zkt_render_device_logs(d, r.message || {}),
+			});
+		},
+	});
+	d.show();
+}
+
+function zkt_render_device_logs(d, data) {
+	const esc = frappe.utils.escape_html;
+	const logs = data.logs || [];
+	let html = "";
+	if ((data.unreachable || []).length) {
+		html += `<div class="alert alert-warning">${__("Could not read: {0}", [esc(data.unreachable.join(", "))])}</div>`;
+	}
+	if (!logs.length) {
+		html += `<p class="text-muted">${__("No punches on the devices for this employee in these dates.")}</p>`;
+	} else {
+		html += `<p class="text-muted">${__("{0} punches on the devices (Device User ID {1})", [logs.length, esc(data.device_user_id)])}</p>`;
+		html += `<div style="max-height: 55vh; overflow: auto">
+			<table class="table table-bordered table-sm">
+				<thead><tr>
+					<th style="width: 50px">#</th><th>${__("Time")}</th><th>${__("Device")}</th><th>${__("Punch")}</th>
+				</tr></thead><tbody>`;
+		logs.forEach((l, i) => {
+			html += `<tr><td>${i + 1}</td><td>${esc(l.time)}</td><td>${esc(l.device_id)}</td><td>${esc(l.punch)}</td></tr>`;
+		});
+		html += "</tbody></table></div>";
+	}
+	d.get_field("logs").$wrapper.html(html);
 }

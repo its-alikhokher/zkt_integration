@@ -4,7 +4,7 @@ import time
 
 import frappe
 from frappe import _
-from frappe.utils import cint
+from frappe.utils import cint, getdate
 from frappe.utils.background_jobs import is_job_enqueued
 from zk import ZK
 
@@ -535,6 +535,64 @@ def run_sync(force=0, show_progress=False):
         "finished": service.finished.strftime("%H:%M:%S"),
         "took_seconds": service.took_seconds,
     }
+
+
+# ZKTeco attendance state codes, as the device labels them
+PUNCH_STATE = {0: "Check In", 1: "Check Out", 2: "Break Out", 3: "Break In", 4: "Overtime In", 5: "Overtime Out"}
+
+
+@frappe.whitelist()
+def get_device_logs(employee, from_date, to_date):
+	""""Device Logs" dialog on ZKT Settings: one employee's punches as the devices
+	hold them, read live from every device, for a date range. Nothing is written."""
+	frappe.only_for("System Manager")
+	from_date, to_date = getdate(from_date), getdate(to_date)
+	if from_date > to_date:
+		frappe.throw(_("From Date cannot be after To Date"))
+
+	device_user_id = frappe.db.get_value("Employee", employee, "attendance_device_id")
+	if not device_user_id:
+		frappe.throw(_("Employee {0} has no Attendance Device ID").format(employee))
+	device_user_id = str(device_user_id).strip()
+
+	logs, unreachable = [], []
+	for device in frappe.get_doc("ZKT Settings").get("devices") or []:
+		zk = ZK(device.ip, port=AttendanceSyncService.PORT, password=_comm_key(device), timeout=10, ommit_ping=True)
+		conn = None
+		try:
+			conn = zk.connect()
+			records = conn.get_attendance()
+		except Exception:
+			unreachable.append(f"{device.device_id} ({device.ip})")
+			continue
+		finally:
+			if conn:
+				conn.disconnect()
+		for r in records:
+			if str(r.user_id).strip() == device_user_id and from_date <= r.timestamp.date() <= to_date:
+				logs.append({"timestamp": r.timestamp, "device_id": device.device_id, "punch": r.punch})
+
+	logs.sort(key=lambda l: l["timestamp"])
+	return {
+		"device_user_id": device_user_id,
+		"unreachable": unreachable,
+		"logs": [
+			{
+				"time": frappe.format(l["timestamp"], {"fieldtype": "Datetime"}),
+				"device_id": l["device_id"],
+				"punch": PUNCH_STATE.get(l["punch"], str(l["punch"])),
+			}
+			for l in logs
+		],
+	}
+
+
+def _comm_key(device):
+	"""Communication password as pyzk expects it; empty or non-numeric means 0."""
+	try:
+		return int(device.get_password("device_password", raise_exception=False) or 0)
+	except (TypeError, ValueError):
+		return 0
 
 
 @frappe.whitelist()
