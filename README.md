@@ -17,7 +17,7 @@ Every run does this for each device listed in **ZKT Settings**:
 
 Everything the sync does is written to the **Attendance Device Log** doctype.
 
-## Requirements
+## Requirements:
 
 - Frappe / ERPNext / HRMS version 15 or 16
 - Python package `pyzk` (installed automatically with the app)
