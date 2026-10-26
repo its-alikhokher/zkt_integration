@@ -131,8 +131,10 @@ class AttendanceSyncService:
     # DEVICE PIPELINE
     # ------------------------------------------------------------------
     def _process_device(self, device):
-        # Step 1: which device user IDs belong to an Active Employee?
-        employees = self._active_employees_by_device_id()
+        # Step 1: which device user IDs belong to an Active Employee? A device set to a company
+        # only answers for that company's employees: devices number their users independently, so
+        # another company's employee with the same ID must not get this device's punches.
+        employees = self._active_employees_by_device_id(device.get("company"))
         if not employees:
             self._log(
                 f"No Active Employee has an Attendance Device ID; skipping device {device.device_id}",
@@ -298,11 +300,14 @@ class AttendanceSyncService:
     # ------------------------------------------------------------------
     # ERPNEXT LOOKUPS / WRITES
     # ------------------------------------------------------------------
-    def _active_employees_by_device_id(self):
-        """{attendance_device_id: employee name} for Active Employees."""
+    def _active_employees_by_device_id(self, company=None):
+        """{attendance_device_id: employee name} for Active Employees, of `company` if given."""
+        filters = {"status": "Active", "attendance_device_id": ["is", "set"]}
+        if company:
+            filters["company"] = company
         rows = frappe.get_all(
             "Employee",
-            filters={"status": "Active", "attendance_device_id": ["is", "set"]},
+            filters=filters,
             fields=["name", "attendance_device_id"],
         )
         return {str(r.attendance_device_id).strip(): r.name for r in rows if r.attendance_device_id}
@@ -550,13 +555,16 @@ def get_device_logs(employee, from_date, to_date):
 	if from_date > to_date:
 		frappe.throw(_("From Date cannot be after To Date"))
 
-	device_user_id = frappe.db.get_value("Employee", employee, "attendance_device_id")
+	device_user_id, company = frappe.db.get_value("Employee", employee, ["attendance_device_id", "company"])
 	if not device_user_id:
 		frappe.throw(_("Employee {0} has no Attendance Device ID").format(employee))
 	device_user_id = str(device_user_id).strip()
 
 	logs, unreachable = [], []
 	for device in frappe.get_doc("ZKT Settings").get("devices") or []:
+		# a device set to another company numbers its own users: the same ID there is someone else
+		if device.get("company") and device.company != company:
+			continue
 		zk = ZK(device.ip, port=AttendanceSyncService.PORT, password=_comm_key(device), timeout=10, ommit_ping=True)
 		conn = None
 		try:
