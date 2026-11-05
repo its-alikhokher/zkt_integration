@@ -6,3 +6,5 @@
 # Patches added in this section will be executed after doctypes are migrated
 zkt_integration.patches.remove_server_script_fixtures
 zkt_integration.patches.remove_zkt_raw_attendance
+zkt_integration.patches.set_employee_checkin_company
+zkt_integration.patches.enable_auto_fetch_on_existing_sites

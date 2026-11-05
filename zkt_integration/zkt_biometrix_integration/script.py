@@ -497,7 +497,10 @@ def scheduled_sync():
     Only queues the run - cron jobs themselves run on the default queue with a 300 s
     timeout. While a run is still going (say a first import of a big device) the tick
     is skipped, and each device's pull frequency still decides whether it is read.
+    Nothing runs while "Enable Auto Fetch" on ZKT Settings is off.
     """
+    if not cint(frappe.db.get_single_value("ZKT Settings", "enable_auto_fetch")):
+        return
     enqueue_sync(force=0)
 
 

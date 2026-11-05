@@ -5,10 +5,18 @@
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
+  "enable_auto_fetch",
   "devices",
   "shift_type_device_mapping"
  ],
  "fields": [
+  {
+   "default": "1",
+   "fieldname": "enable_auto_fetch",
+   "fieldtype": "Check",
+   "label": "Enable Auto Fetch",
+   "description": "When ticked, check-ins are fetched from the devices automatically every 30 minutes. Untick to stop the automatic fetch; Sync Attendance Now still works."
+  },
   {
    "fieldname": "devices",
    "fieldtype": "Table",
@@ -28,7 +36,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-09-04 19:29:05.579850",
+ "modified": "2026-11-05 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "ZKT Biometrix Integration",
  "name": "ZKT Settings",
