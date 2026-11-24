@@ -8,6 +8,10 @@
  "field_order": [
   "clear_from_device_on_fetch",
   "device_id",
+  "connection_type",
+  "serial_number",
+  "push_via_relay",
+  "push_relay_token",
   "ip",
   "company",
   "device_password",
@@ -15,7 +19,8 @@
   "latitude",
   "longitude",
   "pull_frequency",
-  "last_run"
+  "last_run",
+  "push_stamp"
  ],
  "fields": [
   {
@@ -25,7 +30,8 @@
    "label": "Clear From Device On Fetch",
    "in_list_view": 1,
    "description": "Reserved: clearing the device after a sync is currently disabled in code.",
-   "columns": 1
+   "columns": 1,
+   "depends_on": "eval:doc.connection_type!='Push'"
   },
   {
    "fieldname": "device_id",
@@ -36,12 +42,47 @@
    "columns": 2
   },
   {
+   "default": "Pull",
+   "fieldname": "connection_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Connection",
+   "options": "Pull\nPush",
+   "columns": 1,
+   "description": "Pull: this server reads the device on port 4370. Push: the device sends every punch to this server by itself (ZKTeco ADMS / Cloud Server Setting), for newer devices such as the SenseFace series that refuse port 4370."
+  },
+  {
+   "fieldname": "serial_number",
+   "fieldtype": "Data",
+   "label": "Serial Number",
+   "depends_on": "eval:doc.connection_type=='Push'",
+   "mandatory_depends_on": "eval:doc.connection_type=='Push'",
+   "description": "The device's serial number (Menu > System Info > Device Info). A push device is recognised by it."
+  },
+  {
+   "default": "0",
+   "fieldname": "push_via_relay",
+   "fieldtype": "Check",
+   "label": "Via Office Relay",
+   "depends_on": "eval:doc.connection_type=='Push'",
+   "description": "Tick when the device sends to the office relay program (zkt_relay on an always-on office PC) instead of to this site. The relay passes everything to BioTime unchanged and delivers the punches here. Leave unticked if the device sends to this site directly."
+  },
+  {
+   "fieldname": "push_relay_token",
+   "fieldtype": "Password",
+   "label": "Relay Token",
+   "depends_on": "eval:doc.connection_type=='Push' && doc.push_via_relay",
+   "mandatory_depends_on": "eval:doc.connection_type=='Push' && doc.push_via_relay",
+   "description": "Shared secret, at least 16 characters. Put the same value in erpnext_token in the relay's config.json. Requests for this device without it are refused, so nobody else can post punches for it."
+  },
+  {
    "fieldname": "ip",
    "fieldtype": "Data",
    "in_list_view": 1,
    "label": "Device IP Address",
-   "reqd": 1,
-   "columns": 2
+   "columns": 2,
+   "mandatory_depends_on": "eval:doc.connection_type!='Push'",
+   "depends_on": "eval:doc.connection_type!='Push'"
   },
   {
    "fieldname": "company",
@@ -56,7 +97,8 @@
    "fieldtype": "Password",
    "in_list_view": 1,
    "label": "Device Password",
-   "columns": 1
+   "columns": 1,
+   "depends_on": "eval:doc.connection_type!='Push'"
   },
   {
    "default": "AUTO",
@@ -90,7 +132,8 @@
    "fieldtype": "Int",
    "label": "Pull Frequency",
    "in_list_view": 1,
-   "columns": 1
+   "columns": 1,
+   "depends_on": "eval:doc.connection_type!='Push'"
   },
   {
    "fieldname": "last_run",
@@ -98,13 +141,22 @@
    "label": "Last Run",
    "in_list_view": 1,
    "columns": 1
+  },
+  {
+   "fieldname": "push_stamp",
+   "fieldtype": "Data",
+   "label": "Push Stamp",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "Set by the device: up to where its punches were received."
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "istable": 1,
  "links": [],
- "modified": "2026-10-27 10:00:00.000000",
+ "modified": "2026-11-24 23:00:00.000000",
  "modified_by": "Administrator",
  "module": "ZKT Biometrix Integration",
  "name": "ZKT Devices",

@@ -185,13 +185,49 @@ same command through `autossh` or a systemd service on the office PC.
 **C. VPN** (WireGuard, OpenVPN) between the server and the office router. Most secure;
 the device keeps its LAN IP in ZKT Settings.
 
+## Push devices (ADMS)
+
+Newer terminals such as the **SenseFace** series refuse the port-4370 pull protocol
+(`CMD_CONNECT` is answered with an error even with the right comm key) and only *push*:
+the device calls a server itself over HTTP (device menu **COMM. > Cloud Server
+Setting**). The app receives these calls on `/iclock/...` of the site.
+
+In **ZKT Settings > Devices** set *Connection* = **Push** and the device's **Serial
+Number** (Menu > System Info > Device Info). The device is recognised by it; a device
+with an unknown serial number is refused (403) and keeps its punches until it is added.
+Punches go through the same pipeline as a pull (company, IN/OUT, duplicates).
+
+**Direct:** point the device's Cloud Server Setting at the site (address and port).
+
+**Via the office relay:** a device can push to only **one** server. If it must keep
+feeding a server on the office network, such as **ZKTeco BioTime**, point it at the
+small relay program `zkt_relay` on an always-on office PC instead (folder
+[`relay/`](relay/README.md) of this repository, with its install script). The relay passes
+every request to BioTime unchanged (BioTime keeps answering the device) and delivers a
+copy of each punch upload to ERPNext, queued on the PC and retried, so an ERPNext or
+internet outage loses nothing. This is also the way for a site on the internet, which
+cannot reach a LAN address such as BioTime's.
+
+For such a device tick **Via Office Relay** and set a **Relay Token** (16+ characters);
+put the same value in `erpnext_token` in the relay's `config.json`. Requests for the
+device without the token are refused, so nobody can post punches for it from outside.
+Behind the relay BioTime answers the device, so *Re-send Punches* is not available and
+the ATTLOG stamp is left to BioTime. The relay sends a heartbeat only when its queue is
+empty, and only that heartbeat counts as the device's last contact, so Shift Type
+*Last Sync of Checkin* never moves past punches still waiting in the queue.
+
+Every push request is written raw to `logs/zkt_push.log`; refused requests (unknown
+serial, wrong token) also appear in Attendance Device Log, at most once an hour.
+
 ## Notes on devices
 
 - Device memory is limited (an F22 holds 30,000 punches). The app never clears the
   device; delete old records on the device itself when it fills up.
-- The app can be used alongside ZKTeco BioTime / ADMS push mode. Both read the same
-  log; the app connects directly over port 4370.
+- A pull device can be used alongside ZKTeco BioTime / ADMS push mode. Both read the
+  same log; the app connects directly over port 4370. A push-only device feeds one
+  server only; use the office relay (above) to feed BioTime and ERPNext together.
 - The device's clock is used as-is; keep it in sync with the server's timezone.
+  Shift Type *Last Sync of Checkin* is set from the server's own clock.
 
 ## License
 

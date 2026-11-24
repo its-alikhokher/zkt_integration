@@ -89,6 +89,9 @@ required_apps = ["frappe/hrms"]
 # before_install = "zkt_integration.install.before_install"
 after_install = "zkt_integration.install.after_install"
 
+# Devices in PUSH (ADMS) mode call /iclock/... on this site (see zkt_biometrix_integration/push.py)
+page_renderer = ["zkt_integration.zkt_biometrix_integration.push.ICLockPage"]
+
 # Uninstallation
 # ------------
 

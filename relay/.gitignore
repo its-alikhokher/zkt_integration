@@ -1,0 +1,7 @@
+# per-installation files: settings with the Relay Token, data and logs
+config.json
+config.json.bak-*
+queue/
+archive/
+python/
+relay.log*

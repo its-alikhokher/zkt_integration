@@ -35,10 +35,12 @@ class AttendanceSyncService:
     HEARTBEAT_SECONDS = 10  # refresh the status at least this often while check-ins are being written
     COMMIT_EVERY = 200  # check-ins per commit: a killed run keeps its finished work and releases its locks
 
-    def __init__(self, devices, force=False, shift_type_device_mapping=None, show_progress=False):
+    def __init__(self, devices, force=False, shift_type_device_mapping=None, show_progress=False, track_status=True):
         self.devices = devices or []
         self.force = force  # True: ignore each device's pull frequency (manual run)
         self.show_progress = show_progress  # True: push a progress bar to the browser
+        # False for punches a push device sends: they must not overwrite the status of a sync run
+        self.track_status = track_status
         self.shift_type_device_mapping = self._parse_mapping(shift_type_device_mapping)
         self.results = []  # one-line outcomes shown to the user after a manual run
         self.started = None
@@ -76,6 +78,9 @@ class AttendanceSyncService:
         for index, device in enumerate(self.devices):
             # each device owns an equal slice of the progress bar
             self._slice = (index * 100.0 / total, 100.0 / total)
+            if device.get("connection_type") == "Push":
+                self._note_push_device(device, pulled)
+                continue
             last_run = device.last_run
             if last_run and not self.force:
                 minutes = (datetime.datetime.now() - last_run).total_seconds() / 60
@@ -99,6 +104,27 @@ class AttendanceSyncService:
 
         self._update_shift_sync(pulled)
 
+    def _note_push_device(self, device, pulled):
+        """A push device is never read: it sends every punch to /iclock/ as it happens.
+        While it keeps calling in, its punches are complete up to its last contact, which
+        is what the Shift Type sync time needs."""
+        from zkt_integration.zkt_biometrix_integration.push import is_online, last_contact
+
+        contact = last_contact(device)
+        if is_online(device):
+            pulled[device.device_id] = contact
+            self._log(
+                f"Device {device.device_id} (push) sends its punches by itself; last contact {contact:%Y-%m-%d %H:%M:%S}",
+                show=True,
+            )
+        else:
+            when = f"{contact:%Y-%m-%d %H:%M:%S}" if contact else "never"
+            self._log(
+                f"[DEVICE ERROR] {device.device_id} (push) has not called this server recently "
+                f"(last contact: {when}). Check the device's network and its Cloud Server Setting.",
+                show=True,
+            )
+
     @property
     def took_seconds(self):
         if not (self.started and self.finished):
@@ -115,6 +141,8 @@ class AttendanceSyncService:
         """Keep the state of this run in the cache (so the ZKT Settings form can show
         it again after a page refresh) and, for a browser-started run, push it live.
         A cache or realtime hiccup must never break the sync."""
+        if not self.track_status:
+            return
         try:
             status = frappe.cache.get_value(self.STATUS_KEY) or {}
             status.update(fields)
@@ -164,7 +192,43 @@ class AttendanceSyncService:
         if not logs:
             return True
 
-        # Step 3: one Employee Checkin per new punch.
+        failed = self._create_checkins(device, logs, employees)
+
+        # Only clear the device when every record on it has been handled. Punches of
+        # users without an Active Employee are not stored anywhere, so clearing the
+        # device while such records exist would lose them.
+        if failed == 0 and ignored == 0 and device.clear_from_device_on_fetch:
+            self._log("All logs synced — clearing device: " + device.device_id)
+            # self._clear_device(device)
+        else:
+            self._log("Not clearing device — pending unsynced logs remain")
+        return True
+
+    def receive_pushed_logs(self, device, all_logs, unreadable=0):
+        """Punches a push device sent (see push.py), through the same steps as a pull."""
+        employees = self._active_employees_by_device_id(device.get("company"))
+        logs = sorted(
+            (log for log in all_logs if str(log["user_id"]).strip() in employees),
+            key=lambda log: log["timestamp"],
+        )
+        ignored = len(all_logs) - len(logs)
+        message = (
+            f"Received {len(all_logs)} punches from device {device.device_id} (push): "
+            f"{len(logs)} belong to Active Employees, {ignored} ignored (no Active Employee with that ID)"
+        )
+        if ignored:
+            message += ": " + ", ".join(
+                sorted({str(log["user_id"]).strip() for log in all_logs if str(log["user_id"]).strip() not in employees})
+            )
+        if unreadable:
+            message += f", {unreadable} unreadable lines"
+        self._log(message)
+        if logs:
+            self._create_checkins(device, logs, employees, per_user_line=False)
+
+    def _create_checkins(self, device, logs, employees, per_user_line=True):
+        """Step 3: one Employee Checkin per new punch. `logs` are the punches of Active
+        Employees, oldest first. Returns how many HRMS rejected."""
         existing = self._existing_checkins(set(employees.values()), logs[0]["timestamp"])
         last = {}  # employee -> (time, log_type) of the latest punch handled so far
         created = {"IN": 0, "OUT": 0, "": 0}
@@ -222,17 +286,9 @@ class AttendanceSyncService:
             summary += f" + {created['']} without log type"
         summary += f", {duplicates} duplicate punches ignored, {failed} rejected by HRMS"
         self._log(summary, show=True)
-        self._log("Per user: " + ", ".join(f"{uid} ({count})" for uid, count in sorted(per_user.items())))
-
-        # Only clear the device when every record on it has been handled. Punches of
-        # users without an Active Employee are not stored anywhere, so clearing the
-        # device while such records exist would lose them.
-        if failed == 0 and ignored == 0 and device.clear_from_device_on_fetch:
-            self._log("All logs synced — clearing device: " + device.device_id)
-            # self._clear_device(device)
-        else:
-            self._log("Not clearing device — pending unsynced logs remain")
-        return True
+        if per_user_line:
+            self._log("Per user: " + ", ".join(f"{uid} ({count})" for uid, count in sorted(per_user.items())))
+        return failed
 
     # ------------------------------------------------------------------
     # SHIFT TYPE SYNC TIME
@@ -567,6 +623,10 @@ def get_device_logs(employee, from_date, to_date):
 	for device in frappe.get_doc("ZKT Settings").get("devices") or []:
 		# a device set to another company numbers its own users: the same ID there is someone else
 		if device.get("company") and device.company != company:
+			continue
+		if device.get("connection_type") == "Push":
+			# a push device cannot be read on request: it sends its punches by itself
+			unreachable.append(f"{device.device_id} (push device: its punches are already in Employee Checkin)")
 			continue
 		zk = ZK(device.ip, port=AttendanceSyncService.PORT, password=_comm_key(device), timeout=10, ommit_ping=True)
 		conn = None

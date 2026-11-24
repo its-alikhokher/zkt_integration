@@ -23,8 +23,116 @@ frappe.ui.form.on("ZKT Settings", {
 		});
 
 		frm.add_custom_button(__("Device Logs"), () => zkt_device_logs_dialog());
+
+		zkt_show_push_status(frm);
+		if (zkt_resend_devices(frm).length) {
+			frm.add_custom_button(__("Re-send Punches (Push)"), () => zkt_resend_dialog(frm));
+		}
 	},
 });
+
+const ZKT_PUSH_API = "zkt_integration.zkt_biometrix_integration.push";
+
+function zkt_push_devices(frm) {
+	return (frm.doc.devices || []).filter((d) => d.connection_type === "Push" && d.serial_number);
+}
+
+// Behind the office relay BioTime answers the device, so only direct push devices can be
+// asked to send their punches again.
+function zkt_resend_devices(frm) {
+	return zkt_push_devices(frm).filter((d) => !d.push_via_relay);
+}
+
+// Push devices call this site by themselves: show when each one last did, and where to point it.
+function zkt_show_push_status(frm) {
+	if (!zkt_push_devices(frm).length) {
+		frm.set_intro("");
+		return;
+	}
+	frappe.call({
+		method: `${ZKT_PUSH_API}.get_push_status`,
+		callback: (r) => {
+			const esc = frappe.utils.escape_html;
+			const rows = r.message || [];
+			const lines = rows.map((row) => {
+				const where = row.ip ? " " + __("from {0}", [esc(row.ip)]) : "";
+				const state = row.online
+					? __("connected, last contact {0}", [esc(row.last_contact)]) + where
+					: row.last_contact
+					? __("NOT connected, last contact {0}", [esc(row.last_contact)]) + where
+					: __("has never called this site");
+				const via = row.via_relay ? " &mdash; " + __("via the office relay") : "";
+				return `<b>${esc(row.device_id)}</b> (${__("Push")}, SN ${esc(row.serial_number)}): ${state}${via}`;
+			});
+			if (rows.some((row) => !row.via_relay)) {
+				const secure = window.location.protocol === "https:";
+				const port = window.location.port || (secure ? "443" : "80");
+				lines.push(
+					__(
+						"On a push device that sends here directly: COMM. > Cloud Server Setting > Server Address {0}, Server Port {1}, HTTPS {2}.",
+						[esc(window.location.hostname), port, secure ? __("On") : __("Off")]
+					)
+				);
+			}
+			if (rows.some((row) => row.via_relay)) {
+				lines.push(
+					__(
+						"A device via the office relay points to the relay PC, not here; the relay checks in every few minutes and delivers the punches."
+					)
+				);
+			}
+			frm.set_intro(lines.join("<br>"), rows.every((row) => row.online) ? "green" : "orange");
+		},
+	});
+}
+
+// Ask a push device to send a date range of punches again (e.g. after an employee got
+// an Attendance Device ID only after punching). Existing check-ins are skipped.
+function zkt_resend_dialog(frm) {
+	const d = new frappe.ui.Dialog({
+		title: __("Re-send Punches from a Push Device"),
+		fields: [
+			{
+				fieldname: "device_id",
+				label: __("Device"),
+				fieldtype: "Select",
+				options: zkt_resend_devices(frm).map((dev) => dev.device_id),
+				reqd: 1,
+			},
+			{
+				fieldname: "from_date",
+				label: __("From Date"),
+				fieldtype: "Date",
+				reqd: 1,
+				default: frappe.datetime.add_days(frappe.datetime.get_today(), -7),
+			},
+			{
+				fieldname: "to_date",
+				label: __("To Date"),
+				fieldtype: "Date",
+				reqd: 1,
+				default: frappe.datetime.get_today(),
+			},
+		],
+		primary_action_label: __("Send Request"),
+		primary_action(values) {
+			frappe.call({
+				method: `${ZKT_PUSH_API}.resend_punches`,
+				args: values,
+				callback: (r) => {
+					d.hide();
+					const online = r.message && r.message.online;
+					frappe.msgprint(
+						online
+							? __("The device gets the request with its next heartbeat (within a minute). New check-ins appear in Employee Checkin after that.")
+							: __("Request queued, but the device is not connected right now. It gets the request when it calls this site again.")
+					);
+				},
+			});
+		},
+	});
+	d.show();
+}
 
 function zkt_bind_realtime(frm) {
 	if (frm._zkt_bound) return;
